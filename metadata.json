@@ -1,0 +1,6 @@
+{
+  "name": "meshnet",
+  "description": "An offline, peer-to-peer emergency chat application with end-to-end encryption, disappearing messages, slash commands, and decentralized mesh discovery powered by MeshNet.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
