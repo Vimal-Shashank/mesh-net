@@ -181,13 +181,13 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
             className={`flex-1 min-h-[42px] sm:min-h-[44px] flex flex-col items-center justify-center py-1 px-1.5 sm:px-2 rounded-full transition active:scale-95 cursor-pointer ${
               bleConnected
                 ? isLight
-                  ? 'bg-cyan-100 text-cyan-900 border border-cyan-300'
-                  : 'bg-cyan-950 text-cyan-300 border border-cyan-500/50'
+                  ? 'bg-emerald-100 text-emerald-900 border border-emerald-300'
+                  : 'bg-emerald-950 text-emerald-300 border border-emerald-500/50'
                 : isLight
-                ? 'text-slate-600 hover:text-cyan-700 hover:bg-slate-100'
-                : 'text-zinc-400 hover:text-cyan-400 hover:bg-zinc-800/60'
+                ? 'text-slate-600 hover:text-emerald-700 hover:bg-slate-100'
+                : 'text-zinc-400 hover:text-emerald-400 hover:bg-zinc-800/60'
             }`}
-            title={bleConnected ? 'Bluetooth Device Connected (Active Link)' : 'Web Bluetooth BLE Mesh Transceiver'}
+            title={bleConnected ? 'Direct Link Active (P2P / Bluetooth)' : 'Direct Phone-to-Phone Mesh & Bluetooth Transceiver'}
           >
             <div className="relative">
               <Bluetooth className={`w-4 h-4 sm:w-4.5 sm:h-4.5 ${bleConnected ? 'text-emerald-500 animate-pulse' : 'text-cyan-500'}`} />
@@ -196,7 +196,7 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
               )}
             </div>
             <span className="text-[9px] sm:text-[10px] font-medium tracking-tight mt-0.5 whitespace-nowrap">
-              {bleConnected ? 'Linked' : 'BLE'}
+              {bleConnected ? 'Linked' : 'P2P/BLE'}
             </span>
           </button>
         )}

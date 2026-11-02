@@ -14,6 +14,7 @@ interface PeerNode {
   lastSeen: number;
   currentRoom: string;
   publicKey?: string;
+  pin?: string;
 }
 
 interface ChatMessage {
@@ -359,6 +360,7 @@ User Question: ${prompt}`,
       isOnline: p.ws.readyState === WebSocket.OPEN,
       latencyMs: (p as any).latencyMs || 15,
       publicKey: p.publicKey,
+      pin: p.pin,
     }));
 
     broadcastToAll({
@@ -400,7 +402,7 @@ User Question: ${prompt}`,
 
         switch (data.type) {
           case 'join': {
-            const { peerId, nick, roomId } = data;
+            const { peerId, nick, roomId, pin } = data;
             currentPeerId = peerId;
 
             let peerNode = peersMap.get(peerId);
@@ -412,12 +414,14 @@ User Question: ${prompt}`,
                 ip: clientIp,
                 lastSeen: Date.now(),
                 currentRoom: roomId || '#disaster-relief',
+                pin,
               };
               peersMap.set(peerId, peerNode);
             } else {
               peerNode.ws = ws;
               peerNode.nick = nick || peerNode.nick;
               peerNode.currentRoom = roomId || peerNode.currentRoom;
+              if (pin) peerNode.pin = pin;
               peerNode.lastSeen = Date.now();
             }
 
@@ -433,6 +437,7 @@ User Question: ${prompt}`,
               lastSeen: p.lastSeen,
               isOnline: p.ws.readyState === WebSocket.OPEN,
               publicKey: p.publicKey,
+              pin: p.pin,
             }));
 
             sendToPeer(ws, {
@@ -488,12 +493,13 @@ User Question: ${prompt}`,
           }
 
           case 'announce_nick': {
-            const { peerId, nick, publicKey } = data;
+            const { peerId, nick, publicKey, pin } = data;
             const peerNode = peersMap.get(peerId);
             if (peerNode) {
               const oldNick = peerNode.nick;
               peerNode.nick = nick;
               if (publicKey) peerNode.publicKey = publicKey;
+              if (pin) peerNode.pin = pin;
               peerNode.lastSeen = Date.now();
 
               broadcastToAll({
@@ -623,6 +629,74 @@ User Question: ${query}`,
 
           case 'get_peers': {
             broadcastPeersUpdate();
+            break;
+          }
+
+          case 'pair_register_pin': {
+            const { peerId, pin } = data;
+            const peerNode = peersMap.get(peerId);
+            if (peerNode) {
+              peerNode.pin = pin;
+              peerNode.lastSeen = Date.now();
+              broadcastPeersUpdate();
+            }
+            break;
+          }
+
+          case 'pair_request': {
+            const { fromPeerId, fromNick, fromPin, targetPin, targetPeerId } = data;
+            let targetNode: PeerNode | undefined;
+            if (targetPeerId) {
+              targetNode = peersMap.get(targetPeerId);
+            } else if (targetPin) {
+              targetNode = Array.from(peersMap.values()).find(
+                (p) => p.pin === targetPin && p.id !== fromPeerId
+              );
+            }
+
+            if (!targetNode || targetNode.ws.readyState !== WebSocket.OPEN) {
+              sendToPeer(ws, {
+                type: 'pair_error',
+                error: targetPin
+                  ? `Device with PIN ${targetPin} was not found online. Verify the PIN on the target phone.`
+                  : 'The target device is currently offline or unreachable.',
+              });
+            } else {
+              sendToPeer(targetNode.ws, {
+                type: 'pair_request',
+                fromPeerId,
+                fromNick,
+                fromPin,
+              });
+            }
+            break;
+          }
+
+          case 'pair_response': {
+            const { fromPeerId, toPeerId, accepted, pin, reason } = data;
+            const targetNode = peersMap.get(toPeerId);
+            if (targetNode && targetNode.ws.readyState === WebSocket.OPEN) {
+              sendToPeer(targetNode.ws, {
+                type: 'pair_response',
+                fromPeerId,
+                accepted,
+                pin,
+                reason,
+              });
+            }
+            break;
+          }
+
+          case 'webrtc_signal': {
+            const { fromPeerId, toPeerId, signal } = data;
+            const targetNode = peersMap.get(toPeerId);
+            if (targetNode && targetNode.ws.readyState === WebSocket.OPEN) {
+              sendToPeer(targetNode.ws, {
+                type: 'webrtc_signal',
+                fromPeerId,
+                signal,
+              });
+            }
             break;
           }
 

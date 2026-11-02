@@ -1,5 +1,22 @@
 import { ChatMessage } from '../types';
 
+export interface BleAttPacket {
+  id: string;
+  direction: 'tx' | 'rx';
+  timestamp: number;
+  opcode: string; // e.g. '0x52 (ATT_WRITE_CMD)' or '0x1B (ATT_HANDLE_VALUE_NTF)'
+  handle: string; // e.g. '0x001B'
+  uuid: string;   // e.g. '6E400002-B5A3-F393-E0A9-E50E24DCCA9E'
+  mtu: number;    // BLE MTU size, e.g. 20 bytes
+  chunkIndex: number;
+  totalChunks: number;
+  hexDump: string;// e.g. "42 4c 45 3a 4d 65 73 68 4e 65 74"
+  ascii: string;  // e.g. "BLE:MeshNet"
+  rssi: number;   // -48 dBm
+  channel: number;// BLE advertisement / data channel (37, 38, 39, etc.)
+  peerName?: string;
+}
+
 export interface BluetoothDeviceInfo {
   id: string;
   name: string;
@@ -19,6 +36,50 @@ export interface BluetoothDiagnostics {
   browserName: string;
   canUseHardwareBluetooth: boolean;
   blockReason?: string;
+}
+
+// Convert string to hex dump and chunk into 20-byte BLE ATT frames
+export function encodeStringToBleAttFrames(
+  text: string,
+  direction: 'tx' | 'rx' = 'tx',
+  peerName = 'Mesh-Peer',
+  rssi = -52
+): BleAttPacket[] {
+  const encoder = new TextEncoder();
+  const bytes = encoder.encode(text);
+  const CHUNK_SIZE = 20; // Default standard BLE ATT MTU payload size
+  const totalChunks = Math.max(1, Math.ceil(bytes.length / CHUNK_SIZE));
+  const packets: BleAttPacket[] = [];
+  const baseTimestamp = Date.now();
+
+  for (let i = 0; i < totalChunks; i++) {
+    const chunkBytes = bytes.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
+    let hexDump = '';
+    let ascii = '';
+    for (let b of chunkBytes) {
+      hexDump += b.toString(16).padStart(2, '0').toUpperCase() + ' ';
+      ascii += (b >= 32 && b <= 126) ? String.fromCharCode(b) : '.';
+    }
+
+    packets.push({
+      id: `att-${baseTimestamp}-${i}-${Math.random().toString(36).substring(2, 6)}`,
+      direction,
+      timestamp: baseTimestamp + i * 15,
+      opcode: direction === 'tx' ? '0x52 (ATT_WRITE_CMD)' : '0x1B (ATT_HANDLE_VALUE_NTF)',
+      handle: '0x001B',
+      uuid: BLE_SERVICES.NORDIC_TX,
+      mtu: CHUNK_SIZE,
+      chunkIndex: i + 1,
+      totalChunks,
+      hexDump: hexDump.trim(),
+      ascii: ascii.trim(),
+      rssi: rssi + Math.floor(Math.random() * 4) - 2,
+      channel: [37, 38, 39][(i + Math.floor(baseTimestamp / 1000)) % 3],
+      peerName,
+    });
+  }
+
+  return packets;
 }
 
 // Well-known BLE Mesh and Serial GATT service UUIDs
@@ -43,6 +104,8 @@ export class BluetoothMeshManager {
   private messageListeners: Set<(msg: ChatMessage) => void> = new Set();
   private statusListeners: Set<(info: BluetoothDeviceInfo | null) => void> = new Set();
   private logListeners: Set<(log: string) => void> = new Set();
+  private packetListeners: Set<(packet: BleAttPacket) => void> = new Set();
+  private recentPackets: BleAttPacket[] = [];
 
   private virtualBleTimer: number | null = null;
 
@@ -90,6 +153,26 @@ export class BluetoothMeshManager {
       canUseHardwareBluetooth,
       blockReason,
     };
+  }
+
+  public recordPacket(packet: BleAttPacket) {
+    this.recentPackets = [packet, ...this.recentPackets.slice(0, 99)];
+    this.packetListeners.forEach((fn) => fn(packet));
+  }
+
+  public recordMessagePackets(text: string, direction: 'tx' | 'rx', peerName?: string, rssi?: number) {
+    const frames = encodeStringToBleAttFrames(text, direction, peerName || this.connectedDeviceInfo?.name, rssi || this.connectedDeviceInfo?.rssi || -50);
+    frames.forEach((f) => this.recordPacket(f));
+    return frames;
+  }
+
+  public getRecentPackets(): BleAttPacket[] {
+    return [...this.recentPackets];
+  }
+
+  public onPacket(callback: (packet: BleAttPacket) => void) {
+    this.packetListeners.add(callback);
+    return () => this.packetListeners.delete(callback);
   }
 
   public addLog(msg: string) {
@@ -301,6 +384,8 @@ export class BluetoothMeshManager {
 
   private handleIncomingBleData(rawText: string) {
     this.addLog(`[BLE RX] Received: ${rawText}`);
+    this.recordMessagePackets(rawText, 'rx', this.connectedDeviceInfo?.name);
+
     if (this.connectedDeviceInfo) {
       this.connectedDeviceInfo.packetsReceived++;
       this.connectedDeviceInfo.lastActivity = Date.now();
@@ -327,6 +412,7 @@ export class BluetoothMeshManager {
       timestamp: Date.now(),
       timerSeconds: 0,
       isSystemMessage: false,
+      viaTransport: 'bluetooth_ble',
     };
 
     this.messageListeners.forEach((fn) => fn(msg));
@@ -341,6 +427,35 @@ export class BluetoothMeshManager {
     }
 
     this.addLog(`[BLE TX] Sending: "${text.length > 30 ? text.substring(0, 30) + '...' : text}"`);
+    this.recordMessagePackets(text, 'tx', this.connectedDeviceInfo?.name);
+
+    // If direct P2P mesh link is active
+    if (this.connectedDeviceInfo.type === 'p2p_direct') {
+      this.connectedDeviceInfo.packetsSent++;
+      this.connectedDeviceInfo.lastActivity = Date.now();
+      this.notifyStatus(this.connectedDeviceInfo);
+
+      const msg: ChatMessage = {
+        id: `p2p-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+        roomId: '#disaster-relief',
+        senderId: 'local-node',
+        senderNick: 'Local Node',
+        content: text,
+        isEncrypted: false,
+        timestamp: Date.now(),
+        timerSeconds: 0,
+        viaTransport: 'webrtc_p2p',
+      };
+
+      try {
+        const { P2PMeshManager } = await import('./p2pMesh');
+        const p2p = P2PMeshManager.getInstance();
+        if (p2p.getStatus().connected) {
+          p2p.sendChatMessage(msg);
+        }
+      } catch (e) {}
+      return true;
+    }
 
     // If virtual BLE node is active
     if (this.connectedDeviceInfo.type === 'virtual_ble') {

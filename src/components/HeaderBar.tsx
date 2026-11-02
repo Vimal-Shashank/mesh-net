@@ -26,7 +26,9 @@ import {
   Moon,
   Maximize,
   Minimize,
+  Download,
 } from 'lucide-react';
+import { usePWAInstall } from '../lib/usePWAInstall';
 
 interface HeaderBarProps {
   uiMode: UIMode;
@@ -91,6 +93,7 @@ export const HeaderBar: React.FC<HeaderBarProps> = ({
 }) => {
   const [internalShowMobileSheet, setInternalShowMobileSheet] = useState(false);
   const showMobileSheet = isMobileSheetOpen !== undefined ? isMobileSheetOpen : internalShowMobileSheet;
+  const { isInstallable, install } = usePWAInstall();
   const setShowMobileSheet = (open: boolean) => {
     if (setIsMobileSheetOpen) setIsMobileSheetOpen(open);
     else setInternalShowMobileSheet(open);
@@ -280,6 +283,22 @@ export const HeaderBar: React.FC<HeaderBarProps> = ({
               title="Share / Scan QR Code & Room Invite"
             >
               <QrCode className="w-4 h-4 text-emerald-500" />
+            </button>
+          )}
+
+          {/* PWA Install Button */}
+          {isInstallable && (
+            <button
+              onClick={install}
+              className={`flex items-center gap-1.5 px-2.5 py-1 border rounded-lg text-xs font-semibold transition active:scale-95 cursor-pointer ${
+                isLight
+                  ? 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-600 shadow-xs'
+                  : 'bg-emerald-700 hover:bg-emerald-600 text-white border-emerald-500/60 shadow-sm'
+              }`}
+              title="Install MeshNet PWA on this phone for offline use"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>Install Offline App</span>
             </button>
           )}
 

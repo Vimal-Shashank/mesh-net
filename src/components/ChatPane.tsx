@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { ChatMessage, UIMode, ThemeMode, TerminalPalette } from '../types';
 import { getNickColor } from '../lib/crypto';
 import { DisappearingTimerBadge } from './DisappearingTimerBadge';
-import { Lock, Copy, Check, Quote, Trash2, ArrowDown, ShieldCheck, Sparkles, Languages } from 'lucide-react';
+import { Lock, Copy, Check, Quote, Trash2, ArrowDown, ShieldCheck, Sparkles, Languages, Bluetooth } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
 interface ChatPaneProps {
@@ -17,6 +17,7 @@ interface ChatPaneProps {
   onOpenKeys: () => void;
   onBurnMessage: (messageId: string) => void;
   onQuoteMessage?: (text: string, sender: string) => void;
+  onOpenPacketInspector?: () => void;
 }
 
 export const ChatPane: React.FC<ChatPaneProps> = ({
@@ -31,6 +32,7 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
   onOpenKeys,
   onBurnMessage,
   onQuoteMessage,
+  onOpenPacketInspector,
 }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -459,6 +461,34 @@ export const ChatPane: React.FC<ChatPaneProps> = ({
                         : 'text-zinc-500'
                     }`}
                   >
+                    {msg.viaTransport === 'webrtc_p2p' && (
+                      <button
+                        onClick={onOpenPacketInspector}
+                        className={`px-1.5 py-0.2 rounded text-[9px] border font-mono flex items-center gap-1 transition cursor-pointer active:scale-95 ${
+                          isLight
+                            ? 'bg-emerald-100 hover:bg-emerald-200 text-emerald-900 border-emerald-300'
+                            : 'bg-emerald-950/80 hover:bg-emerald-900 text-emerald-300 border-emerald-500/40'
+                        }`}
+                        title="Transmitted via direct phone-to-phone radio channel. Click to inspect raw BLE ATT frames."
+                      >
+                        <Bluetooth className="w-2.5 h-2.5 text-emerald-500" />
+                        <span>BLE P2P</span>
+                      </button>
+                    )}
+                    {msg.viaTransport === 'bluetooth_ble' && (
+                      <button
+                        onClick={onOpenPacketInspector}
+                        className={`px-1.5 py-0.2 rounded text-[9px] border font-mono flex items-center gap-1 transition cursor-pointer active:scale-95 ${
+                          isLight
+                            ? 'bg-cyan-100 hover:bg-cyan-200 text-cyan-900 border-cyan-300'
+                            : 'bg-cyan-950/80 hover:bg-cyan-900 text-cyan-300 border-cyan-500/40'
+                        }`}
+                        title="Transmitted via Web Bluetooth GATT transceiver. Click to inspect raw BLE ATT frames."
+                      >
+                        <Bluetooth className="w-2.5 h-2.5 text-cyan-500" />
+                        <span>BLE GATT</span>
+                      </button>
+                    )}
                     {msg.isDirectMessage && (
                       <span className={`px-1 py-0.2 rounded text-[9px] border ${
                         isLight

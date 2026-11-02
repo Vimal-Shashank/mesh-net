@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Peer, UIMode, ThemeMode } from '../types';
 import { getNickColor } from '../lib/crypto';
-import { Users, MessageSquare, Copy, Check, Radio, ShieldCheck, RefreshCw, X } from 'lucide-react';
+import { Users, MessageSquare, Copy, Check, Radio, ShieldCheck, RefreshCw, X, Smartphone } from 'lucide-react';
 
 interface PeerSidebarProps {
   peers: Peer[];
@@ -10,6 +10,7 @@ interface PeerSidebarProps {
   themeMode?: ThemeMode;
   onSelectDM?: (nick: string) => void;
   onRefreshPeers?: () => void;
+  onDirectConnect?: (peer: Peer) => void;
   isOpenMobile?: boolean;
   onCloseMobile?: () => void;
 }
@@ -69,6 +70,7 @@ export const PeerSidebar: React.FC<PeerSidebarProps> = ({
   themeMode = 'dark',
   onSelectDM,
   onRefreshPeers,
+  onDirectConnect,
   isOpenMobile,
   onCloseMobile,
 }) => {
@@ -126,6 +128,13 @@ export const PeerSidebar: React.FC<PeerSidebarProps> = ({
             {peer.nick}
           </span>
           {isSelf && <span className={`text-[10px] font-normal ${isLight ? 'text-slate-500' : 'text-zinc-500'}`}>(you)</span>}
+          {peer.pin && (
+            <span className={`text-[9px] font-mono px-1 rounded ${
+              isLight ? 'bg-amber-100 text-amber-900 border border-amber-300' : 'bg-amber-950/80 text-amber-400 border border-amber-500/30'
+            }`}>
+              #{peer.pin}
+            </span>
+          )}
           {!isOnline && (
             <span className={`text-[10px] font-mono italic ${isLight ? 'text-slate-400' : 'text-zinc-500'}`}>
               ({formatLastSeen(peer.lastSeen)})
@@ -160,6 +169,23 @@ export const PeerSidebar: React.FC<PeerSidebarProps> = ({
               <Copy className="w-3 h-3" />
             )}
           </button>
+
+          {!isSelf && isOnline && onDirectConnect && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onDirectConnect(peer);
+              }}
+              className={`p-1 rounded transition ${
+                isLight
+                  ? 'hover:bg-emerald-100 text-emerald-700'
+                  : 'hover:bg-emerald-950/80 text-emerald-400'
+              }`}
+              title={`Direct Connect / Pair with @${peer.nick}`}
+            >
+              <Smartphone className="w-3 h-3" />
+            </button>
+          )}
 
           {!isSelf && isOnline && onSelectDM && (
             <button

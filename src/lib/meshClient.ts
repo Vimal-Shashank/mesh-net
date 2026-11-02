@@ -10,11 +10,16 @@ type StatsCallback = (stats: MeshStats) => void;
 type MessageBurnedCallback = (messageId: string, roomId: string) => void;
 type StatusCallback = (connected: boolean) => void;
 type TypingCallback = (roomId: string, peerId: string, nick: string, isTyping: boolean) => void;
+type PairRequestCallback = (req: { fromPeerId: string; fromNick: string; fromPin: string }) => void;
+type PairResponseCallback = (res: { fromPeerId: string; accepted: boolean; pin?: string; reason?: string }) => void;
+type PairErrorCallback = (error: string) => void;
+type WebRTCSignalCallback = (fromPeerId: string, signal: any) => void;
 
 export class MeshClient {
   private ws: WebSocket | null = null;
   private peerId: string;
   private nick: string;
+  private pin: string;
   private currentRoom: string;
   private isConnected = false;
   private reconnectTimer: number | null = null;
@@ -27,10 +32,15 @@ export class MeshClient {
   private onMessageBurnedListeners: Set<MessageBurnedCallback> = new Set();
   private onStatusListeners: Set<StatusCallback> = new Set();
   private onTypingListeners: Set<TypingCallback> = new Set();
+  private onPairRequestListeners: Set<PairRequestCallback> = new Set();
+  private onPairResponseListeners: Set<PairResponseCallback> = new Set();
+  private onPairErrorListeners: Set<PairErrorCallback> = new Set();
+  private onWebRTCSignalListeners: Set<WebRTCSignalCallback> = new Set();
 
-  constructor(peerId: string, nick: string, initialRoom = '#disaster-relief') {
+  constructor(peerId: string, nick: string, pin: string, initialRoom = '#disaster-relief') {
     this.peerId = peerId;
     this.nick = nick;
+    this.pin = pin;
     this.currentRoom = initialRoom;
 
     if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
@@ -56,15 +66,16 @@ export class MeshClient {
         this.isConnected = true;
         this.notifyStatus(true);
 
-        // Join active room
+        // Join active room and register PIN
         this.send({
           type: 'join',
           peerId: this.peerId,
           nick: this.nick,
           roomId: this.currentRoom,
+          pin: this.pin,
         });
 
-        // Start ping ping loop for real latency stats
+        // Start ping loop for latency stats
         this.startPingLoop();
       };
 
@@ -141,6 +152,16 @@ export class MeshClient {
       peerId: this.peerId,
       nick: newNick,
       publicKey,
+      pin: this.pin,
+    });
+  }
+
+  public setPin(newPin: string) {
+    this.pin = newPin;
+    this.send({
+      type: 'pair_register_pin',
+      peerId: this.peerId,
+      pin: newPin,
     });
   }
 
@@ -151,6 +172,7 @@ export class MeshClient {
       peerId: this.peerId,
       nick: this.nick,
       roomId: roomId,
+      pin: this.pin,
     });
   }
 
@@ -190,6 +212,57 @@ export class MeshClient {
     this.send({
       type: 'get_peers',
     });
+  }
+
+  // P2P Direct Connection & Pairing Protocol
+  public sendPairRequest(target: { targetPeerId?: string; targetPin?: string }) {
+    const payload = {
+      type: 'pair_request' as const,
+      fromPeerId: this.peerId,
+      fromNick: this.nick,
+      fromPin: this.pin,
+      targetPin: target.targetPin,
+      targetPeerId: target.targetPeerId,
+    };
+
+    this.send(payload);
+
+    // Also broadcast to local tabs
+    if (this.broadcastChannel) {
+      this.broadcastChannel.postMessage(payload);
+    }
+  }
+
+  public sendPairResponse(toPeerId: string, accepted: boolean, pin?: string, reason?: string) {
+    const payload = {
+      type: 'pair_response' as const,
+      fromPeerId: this.peerId,
+      toPeerId,
+      accepted,
+      pin: pin || this.pin,
+      reason,
+    };
+
+    this.send(payload);
+
+    if (this.broadcastChannel) {
+      this.broadcastChannel.postMessage(payload);
+    }
+  }
+
+  public sendWebRTCSignal(toPeerId: string, signal: any) {
+    const payload = {
+      type: 'webrtc_signal' as const,
+      fromPeerId: this.peerId,
+      toPeerId,
+      signal,
+    };
+
+    this.send(payload);
+
+    if (this.broadcastChannel) {
+      this.broadcastChannel.postMessage(payload);
+    }
   }
 
   public pingServer(): Promise<number> {
@@ -247,6 +320,26 @@ export class MeshClient {
         this.onTypingListeners.forEach((fn) => fn(data.roomId, data.peerId, data.nick, data.isTyping));
         break;
       }
+      case 'pair_request': {
+        this.onPairRequestListeners.forEach((fn) =>
+          fn({ fromPeerId: data.fromPeerId, fromNick: data.fromNick, fromPin: data.fromPin })
+        );
+        break;
+      }
+      case 'pair_response': {
+        this.onPairResponseListeners.forEach((fn) =>
+          fn({ fromPeerId: data.fromPeerId, accepted: data.accepted, pin: data.pin, reason: data.reason })
+        );
+        break;
+      }
+      case 'pair_error': {
+        this.onPairErrorListeners.forEach((fn) => fn(data.error));
+        break;
+      }
+      case 'webrtc_signal': {
+        this.onWebRTCSignalListeners.forEach((fn) => fn(data.fromPeerId, data.signal));
+        break;
+      }
       case 'peer_nick_changed': {
         // Handled via peers_update
         break;
@@ -254,10 +347,33 @@ export class MeshClient {
     }
   }
 
-  private handleBroadcastEvent(data: { type: string; message?: ChatMessage }) {
-    if (data && data.type === 'local_chat' && data.message) {
-      // Sync chat message to local client listeners
+  private handleBroadcastEvent(data: any) {
+    if (!data || typeof data !== 'object') return;
+
+    if (data.type === 'local_chat' && data.message) {
       this.onMessageListeners.forEach((fn) => fn(data.message!));
+    } else if (data.type === 'pair_request') {
+      // Check if this local window is the target (either matching peerId or matching pin)
+      if (data.fromPeerId !== this.peerId) {
+        if (
+          (data.targetPeerId && data.targetPeerId === this.peerId) ||
+          (data.targetPin && data.targetPin === this.pin)
+        ) {
+          this.onPairRequestListeners.forEach((fn) =>
+            fn({ fromPeerId: data.fromPeerId, fromNick: data.fromNick, fromPin: data.fromPin })
+          );
+        }
+      }
+    } else if (data.type === 'pair_response') {
+      if (data.toPeerId === this.peerId) {
+        this.onPairResponseListeners.forEach((fn) =>
+          fn({ fromPeerId: data.fromPeerId, accepted: data.accepted, pin: data.pin, reason: data.reason })
+        );
+      }
+    } else if (data.type === 'webrtc_signal') {
+      if (data.toPeerId === this.peerId) {
+        this.onWebRTCSignalListeners.forEach((fn) => fn(data.fromPeerId, data.signal));
+      }
     }
   }
 
@@ -289,6 +405,26 @@ export class MeshClient {
   public onTyping(callback: TypingCallback) {
     this.onTypingListeners.add(callback);
     return () => this.onTypingListeners.delete(callback);
+  }
+
+  public onPairRequest(callback: PairRequestCallback) {
+    this.onPairRequestListeners.add(callback);
+    return () => this.onPairRequestListeners.delete(callback);
+  }
+
+  public onPairResponse(callback: PairResponseCallback) {
+    this.onPairResponseListeners.add(callback);
+    return () => this.onPairResponseListeners.delete(callback);
+  }
+
+  public onPairError(callback: PairErrorCallback) {
+    this.onPairErrorListeners.add(callback);
+    return () => this.onPairErrorListeners.delete(callback);
+  }
+
+  public onWebRTCSignal(callback: WebRTCSignalCallback) {
+    this.onWebRTCSignalListeners.add(callback);
+    return () => this.onWebRTCSignalListeners.delete(callback);
   }
 
   public disconnect() {

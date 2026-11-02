@@ -28,11 +28,18 @@ import { KeysModal } from './components/KeysModal';
 import { RoomModal } from './components/RoomModal';
 import { ShortcutsModal } from './components/ShortcutsModal';
 import { BluetoothModal } from './components/BluetoothModal';
+import { BlePacketInspectorModal } from './components/BlePacketInspectorModal';
 import { BluetoothMeshManager, BluetoothDeviceInfo } from './lib/bluetooth';
 import { QRCodeModal } from './components/QRCodeModal';
 import { MobileBottomNav } from './components/MobileBottomNav';
+import { P2PMeshManager, IncomingPairRequest } from './lib/p2pMesh';
+import { PairingConfirmationModal } from './components/PairingConfirmationModal';
+import { useOnlineStatus } from './lib/useOnlineStatus';
+import { Bluetooth } from 'lucide-react';
 
 export default function App() {
+  const isOnline = useOnlineStatus();
+
   // Core Node Identity State
   const [peerId] = useState<string>(() => {
     const saved = localStorage.getItem('meshnet_peer_id');
@@ -50,6 +57,18 @@ export default function App() {
     localStorage.setItem('meshnet_nick', randomNick);
     return randomNick;
   });
+
+  // Persistent 6-Digit Device Sync PIN
+  const [pin] = useState<string>(() => {
+    const saved = localStorage.getItem('meshnet_device_pin');
+    if (saved && saved.length === 6) return saved;
+    const newPin = Math.floor(100000 + Math.random() * 900000).toString();
+    localStorage.setItem('meshnet_device_pin', newPin);
+    return newPin;
+  });
+
+  // Incoming phone-to-phone pairing request
+  const [incomingPairRequest, setIncomingPairRequest] = useState<IncomingPairRequest | null>(null);
 
   // Crypto Identity
   const [fingerprint, setFingerprint] = useState<string>('');
@@ -76,8 +95,21 @@ export default function App() {
     return saved ? JSON.parse(saved) : { '#disaster-relief': 30 };
   });
 
-  // Chat Messages State per Room
-  const [messagesMap, setMessagesMap] = useState<Record<string, ChatMessage[]>>({});
+  // Chat Messages State per Room with Offline Persistence
+  const [messagesMap, setMessagesMap] = useState<Record<string, ChatMessage[]>>(() => {
+    try {
+      const saved = localStorage.getItem('meshnet_offline_messages');
+      return saved ? JSON.parse(saved) : {};
+    } catch (e) {
+      return {};
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('meshnet_offline_messages', JSON.stringify(messagesMap));
+    } catch (e) {}
+  }, [messagesMap]);
 
   // Peers & Mesh Network State
   const [peers, setPeers] = useState<Peer[]>([]);
@@ -154,6 +186,7 @@ export default function App() {
   const [isSidebarOpenMobile, setIsSidebarOpenMobile] = useState(false);
   const [isMobileSheetOpen, setIsMobileSheetOpen] = useState(false);
   const [bleDevice, setBleDevice] = useState<BluetoothDeviceInfo | null>(null);
+  const [isPacketInspectorOpen, setIsPacketInspectorOpen] = useState(false);
 
   const openKeysModal = (tab: 'key' | 'qr' | 'profile' = 'key') => {
     setKeysModalTab(tab);
@@ -319,10 +352,39 @@ export default function App() {
     };
   }, [processChatMessage]);
 
-  // Initialize Mesh Client
+  // Initialize Mesh Client & P2P WebRTC Mesh Manager
   useEffect(() => {
-    const client = new MeshClient(peerId, nick, currentRoom);
+    const client = new MeshClient(peerId, nick, pin, currentRoom);
     clientRef.current = client;
+
+    // Initialize Phone-to-Phone WebRTC Manager
+    const p2p = P2PMeshManager.getInstance();
+    p2p.init(peerId, nick, pin, client);
+
+    const unsubP2PReq = p2p.onIncomingRequest((req) => {
+      setIncomingPairRequest(req);
+    });
+
+    const unsubP2PMsg = p2p.onMessage((msg) => {
+      processChatMessage(msg);
+    });
+
+    const unsubP2PStatus = p2p.onStatusChange((status) => {
+      if (status.connected && status.peerNick) {
+        setBleDevice({
+          id: status.peerId || 'p2p-direct',
+          name: `Direct Mesh: @${status.peerNick}`,
+          connected: true,
+          type: 'p2p_direct',
+          serviceUuid: 'WebRTC DataChannel (0-Hop)',
+          packetsSent: status.packetsSent,
+          packetsReceived: status.packetsReceived,
+          lastActivity: status.lastActivity,
+        });
+      } else if (!status.connected && bleDevice?.type === 'p2p_direct') {
+        setBleDevice(null);
+      }
+    });
 
     client.onMessage((msg) => {
       processChatMessage(msg);
@@ -369,9 +431,12 @@ export default function App() {
 
     return () => {
       clearInterval(autoRefreshTimer);
+      unsubP2PReq();
+      unsubP2PMsg();
+      unsubP2PStatus();
       client.disconnect();
     };
-  }, [peerId]); // Run once on load
+  }, [peerId, pin]); // Run on mount
 
   // Global Keyboard Shortcuts (Ctrl+K, Ctrl+L, Ctrl+J, Ctrl+B, Ctrl+T, Ctrl+M, Ctrl+?)
   useEffect(() => {
@@ -683,6 +748,17 @@ export default function App() {
       encryptedPayload = await encryptText(rawInput, roomPass);
     }
 
+    const p2pMgr = P2PMeshManager.getInstance();
+    const bleMgr = BluetoothMeshManager.getInstance();
+    const activeBle = bleMgr.getConnectedDevice();
+
+    const transportType: 'webrtc_p2p' | 'bluetooth_ble' | 'websocket' =
+      activeBle?.connected
+        ? (activeBle.type === 'ble_hardware' ? 'bluetooth_ble' : 'webrtc_p2p')
+        : p2pMgr.getStatus().connected
+        ? 'webrtc_p2p'
+        : 'websocket';
+
     const newMsg: ChatMessage = {
       id: `msg-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
       roomId: currentRoom,
@@ -694,16 +770,38 @@ export default function App() {
       timestamp: Date.now(),
       timerSeconds: timerSec,
       expiresAt: timerSec > 0 ? Date.now() + timerSec * 1000 : undefined,
+      viaTransport: transportType,
     };
 
+    // Always frame message into BLE ATT telemetry for inspector
+    bleMgr.recordMessagePackets(rawInput, 'tx', nick, -48);
+
+    // 1. Send via WebSocket Mesh
     if (clientRef.current) {
       clientRef.current.sendChatMessage(newMsg);
     }
-    // Also broadcast over Bluetooth BLE / P2P transceiver if active
-    if (BluetoothMeshManager.getInstance().getConnectedDevice()?.connected) {
-      BluetoothMeshManager.getInstance().sendPacket(newMsg.content).catch(() => {});
+    // 2. Send directly over WebRTC DataChannel if P2P phone link is active
+    if (p2pMgr.getStatus().connected) {
+      p2pMgr.sendChatMessage(newMsg);
+    }
+    // 3. Send over Bluetooth BLE transceiver if active
+    if (activeBle && activeBle.connected && activeBle.type !== 'p2p_direct') {
+      bleMgr.sendPacket(newMsg.content).catch(() => {});
     }
     processChatMessage(newMsg);
+  };
+
+  const handleAcceptPairRequest = async (fromPeerId: string, fromNick: string) => {
+    await P2PMeshManager.getInstance().acceptPairRequest(fromPeerId, fromNick);
+    appendSystemMessage(
+      currentRoom,
+      `Encrypted direct phone-to-phone WebRTC channel established with @${fromNick}! Zero-hop mesh communication active.`
+    );
+  };
+
+  const handleDeclinePairRequest = (fromPeerId: string) => {
+    P2PMeshManager.getInstance().declinePairRequest(fromPeerId);
+    appendSystemMessage(currentRoom, `Pairing request from ${fromPeerId} was declined.`);
   };
 
   const handleBurnMessage = (messageId: string) => {
@@ -722,6 +820,7 @@ export default function App() {
   const activeTimer = roomTimers[currentRoom] || 0;
   const activePaletteTheme = getPaletteTheme(palette, themeMode);
   const currentRoomTypingNicks = Object.values(typingMap[currentRoom] || {});
+  const isLight = themeMode === 'light';
 
   return (
     <div
@@ -765,6 +864,70 @@ export default function App() {
         onToggleFullscreen={handleToggleFullscreen}
       />
 
+      {/* Bluetooth Mesh Active Status Banner */}
+      {bleDevice?.connected && (
+        <div
+          className={`px-3 py-1.5 text-xs font-mono flex items-center justify-between border-b select-none transition-colors ${
+            isLight
+              ? 'bg-cyan-50/90 border-cyan-300 text-cyan-950'
+              : 'bg-cyan-950/80 text-cyan-300 border-cyan-500/40'
+          }`}
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            <Bluetooth className="w-3.5 h-3.5 text-cyan-400 animate-pulse flex-shrink-0" />
+            <span className="font-bold flex-shrink-0">BLE RADIO ACTIVE:</span>
+            <span className="truncate">
+              {bleDevice.name} (RSSI {bleDevice.rssi || -48} dBm)
+            </span>
+            <span className={`hidden sm:inline-block px-1.5 py-0.2 rounded border text-[10px] font-mono ${
+              isLight ? 'bg-white border-cyan-300 text-cyan-800' : 'bg-cyan-900/40 border-cyan-500/30 text-cyan-200'
+            }`}>
+              TX: {bleDevice.packetsSent} | RX: {bleDevice.packetsReceived}
+            </span>
+          </div>
+          <div className="flex items-center gap-2 flex-shrink-0">
+            <button
+              onClick={() => setIsPacketInspectorOpen(true)}
+              className={`px-2 py-0.5 rounded border text-[11px] font-semibold cursor-pointer transition ${
+                isLight ? 'bg-white hover:bg-slate-100 border-cyan-300 text-cyan-900' : 'bg-cyan-900/60 hover:bg-cyan-800 border-cyan-500/40 text-cyan-200'
+              }`}
+            >
+              Inspect BLE Frames
+            </button>
+            <button
+              onClick={() => setIsBluetoothOpen(true)}
+              className="underline text-[11px] cursor-pointer hover:opacity-80"
+            >
+              Settings
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Offline Mode Status Banner */}
+      {!isOnline && !bleDevice?.connected && (
+        <div
+          className={`px-3 py-1.5 text-xs font-mono flex items-center justify-between border-b select-none ${
+            isLight
+              ? 'bg-amber-50 border-amber-300 text-amber-950'
+              : 'bg-amber-950/90 text-amber-300 border-amber-500/40'
+          }`}
+        >
+          <div className="flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-amber-400" />
+            <span>
+              OFFLINE MODE — Network disconnected. Pair devices via PIN or Bluetooth to chat offline.
+            </span>
+          </div>
+          <button
+            onClick={() => setIsBluetoothOpen(true)}
+            className="underline text-[11px] font-bold cursor-pointer hover:opacity-80 ml-2 flex-shrink-0"
+          >
+            Pair Phone
+          </button>
+        </div>
+      )}
+
       {/* Main Body */}
       <div className="flex-1 flex min-h-0 relative">
         {/* Chat Transcript Area */}
@@ -779,6 +942,7 @@ export default function App() {
           hasRoomPassword={isEncryptedRoom}
           onOpenKeys={() => openKeysModal('key')}
           onBurnMessage={handleBurnMessage}
+          onOpenPacketInspector={() => setIsPacketInspectorOpen(true)}
         />
 
         {/* Live Peers Sidebar */}
@@ -792,6 +956,10 @@ export default function App() {
           }}
           onRefreshPeers={() => {
             clientRef.current?.requestPeersRefresh();
+          }}
+          onDirectConnect={(peer) => {
+            P2PMeshManager.getInstance().requestPairByPeerId(peer.id, peer.nick);
+            setIsBluetoothOpen(true);
           }}
           isOpenMobile={isSidebarOpenMobile}
           onCloseMobile={() => setIsSidebarOpenMobile(false)}
@@ -893,8 +1061,17 @@ export default function App() {
         currentRoom={currentRoom}
         nick={nick}
         peerId={peerId}
+        pin={pin}
         peers={peers}
         onOpenQR={() => setIsQROpen(true)}
+        onOpenPacketInspector={() => setIsPacketInspectorOpen(true)}
+      />
+
+      <BlePacketInspectorModal
+        isOpen={isPacketInspectorOpen}
+        onClose={() => setIsPacketInspectorOpen(false)}
+        uiMode={uiMode}
+        themeMode={themeMode}
       />
 
       <QRCodeModal
@@ -906,6 +1083,14 @@ export default function App() {
         onJoinRoom={(room, pass) => {
           handleSendMessage(`/join ${room} ${pass || ''}`);
         }}
+      />
+
+      <PairingConfirmationModal
+        request={incomingPairRequest}
+        onAccept={handleAcceptPairRequest}
+        onDecline={handleDeclinePairRequest}
+        uiMode={uiMode}
+        themeMode={themeMode}
       />
     </div>
   );
